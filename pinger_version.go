@@ -22,13 +22,6 @@ type ConfigIni struct {
 	LogPath     string
 }
 
-type HotelStruct struct {
-	Hotel_admin_id       string `json: "hotel_admin_id"`
-	Hotel_name           string `json: "hotel_name"`
-	Hotel_vpn_ip_address string `json: "hotel_vpn_ip_address"`
-	Hotel_vpn_port       string `json: "hotel_vpn_port"`
-}
-
 type VersionStruct struct {
 	Major string `json: "major"`
 	Minor string `json: "minor"`
@@ -36,6 +29,13 @@ type VersionStruct struct {
 	Git   string `json: "git"`
 	Code  string `json: "code"`
 	Date  string `json: "date"`
+}
+
+type HotelStruct struct {
+	Hotel_admin_id       string `json: "hotel_admin_id"`
+	Hotel_name           string `json: "hotel_name"`
+	Hotel_vpn_ip_address string `json: "hotel_vpn_ip_address"`
+	Hotel_vpn_port       string `json: "hotel_vpn_port"`
 }
 
 var wg sync.WaitGroup
@@ -71,7 +71,6 @@ func get_data() {
 		}
 		json_data := make([]HotelStruct, 0)
 		json.Unmarshal(data, &json_data)
-
 		wg.Add(len(json_data))
 		for _, v := range json_data {
 			list := strings.Split(v.Hotel_vpn_ip_address, " ")
@@ -81,7 +80,7 @@ func get_data() {
 				ip_value = strings.ReplaceAll(ip_value, " ", "")
 				if ip_value == "" {
 				} else {
-					go ping_hosts(ip_value, v.Hotel_admin_id)
+					ping_hosts(ip_value, v.Hotel_admin_id)
 				}
 			}
 		}
@@ -89,12 +88,10 @@ func get_data() {
 }
 
 func ping_hosts(ip_value string, hotel_id string) {
-
 	out, err := exec.Command("fping", ip_value).Output()
 	if err != nil {
 		version_data, _ := get_version(hotel_id, ip_value)
 		send_status(hotel_id, "0", version_data)
-		pingerlog.Println(ip_value, "no ping error", "hotel_id: "+hotel_id)
 	} else {
 		if strings.Contains(string(out), "alive") {
 			version_data, status := get_version(hotel_id, ip_value)
@@ -104,7 +101,7 @@ func ping_hosts(ip_value string, hotel_id string) {
 				send_status(hotel_id, "1", version_data)
 			}
 		}
-		wg.Done()
+		// wg.Done()
 	}
 }
 
@@ -130,6 +127,7 @@ func get_version(hotel_id string, ip string) (string, bool) {
 				return string(json_value), false
 			} else {
 				json.Unmarshal(data, &listData)
+
 				json_value, _ := json.Marshal(map[string]string{
 					"major": listData.Major,
 					"minor": listData.Minor,
@@ -176,15 +174,21 @@ func get_version(hotel_id string, ip string) (string, bool) {
 }
 
 func send_status(hotel_id string, status string, version string) {
+	var data_version VersionStruct
+	json.Unmarshal([]byte(version), &data_version)
 	request, err := http.PostForm("http://"+confiServer.ServerUrl+":"+confiServer.ServerPort+"/dashboard/goping/",
 		url.Values{
 			"token":    {confiServer.ServerToken},
 			"hotel_id": {hotel_id},
 			"status":   {status},
-			"version":  {version},
-		})
+			"major":    {data_version.Major},
+			"minor":    {data_version.Minor},
+			"patch":    {data_version.Patch},
+			"git":      {data_version.Git},
+			"code":     {data_version.Code},
+			"date":     {data_version.Date}})
 	if err != nil {
-		pingerlog.Println("post error")
+		pingerlog.Println("post error ", hotel_id)
 	} else {
 		defer request.Body.Close()
 	}
@@ -197,11 +201,10 @@ func main() {
 	}
 	defer file.Close()
 	pingerlog = log.New(file, "pinger: ", log.LstdFlags)
-	pingerlog.Println("GET CONFIG")
+	pingerlog.Println("*** Get config ***")
 	get_config()
-	pingerlog.Println("Create log")
-	pingerlog.Println("GET DATA")
+	pingerlog.Println("*** Get data from server ***")
 	get_data()
-	wg.Wait()
-	pingerlog.Println("END")
+	// wg.Wait()
+	pingerlog.Println("*** END ***")
 }
