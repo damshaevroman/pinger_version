@@ -200,14 +200,13 @@ func send_status(hotel_id string, status string, version string) {
 }
 
 func main() {
+	get_config()
 	file, err := os.OpenFile(confiServer.LogPath+"pinger.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer file.Close()
 	pingerlog = log.New(file, "pinger: ", log.LstdFlags)
-	pingerlog.Println("*** Get config ***")
-	get_config()
 	pingerlog.Println("*** Get data from server ***")
 	get_data()
 	// wg.Wait()
