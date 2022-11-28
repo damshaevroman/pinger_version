@@ -1,4 +1,4 @@
-# pinger_version
+# pinger_version 1.0.1
 Goland pinger version
 1. установите дистрибутив fping
 2. Скачайте с репозитория проект

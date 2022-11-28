@@ -94,10 +94,11 @@ func ping_hosts(ip_value string, hotel_id string) {
 		version_data, _ := get_version(hotel_id, ip_value)
 		send_status(hotel_id, "0", version_data)
 	} else {
+
 		if strings.Contains(string(out), "alive") {
 			version_data, status := get_version(hotel_id, ip_value)
 			if status == false {
-				send_status(hotel_id, "0", version_data)
+				send_status(hotel_id, "1", version_data)
 			} else {
 				send_status(hotel_id, "1", version_data)
 			}
@@ -181,6 +182,7 @@ func send_status(hotel_id string, status string, version string) {
 	data_version.Token = confiServer.ServerToken
 	json.Unmarshal([]byte(version), &data_version)
 	data, err := json.MarshalIndent(data_version, "", "  ")
+	println(string(data))
 	if err != nil {
 		pingerlog.Println(err)
 	} else {
