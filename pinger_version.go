@@ -4,15 +4,27 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"io/ioutil"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
-	"os/exec"
 	"strings"
+	"time"
 
+	ping "github.com/prometheus-community/pro-bing"
 	"gopkg.in/ini.v1"
+)
+
+var (
+	httpClient = &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
 )
 
 type ConfigIni struct {
@@ -24,193 +36,208 @@ type ConfigIni struct {
 
 type VersionStruct struct {
 	Hotel_id string `json:"hotel_id"`
-	Status   string `json:"status"`
-	Token    string `json:"token"`
+	Status   bool   `json:"status"`
 	Major    string `json:"major"`
 	Minor    string `json:"minor"`
 	Patch    string `json:"patch"`
 	Git      string `json:"git"`
 	Code     string `json:"code"`
 	Date     string `json:"date"`
+	CertName string `json:"hotel_name_certification"`
 }
 
 type HotelStruct struct {
-	Hotel_admin_id       string `json:"hotel_admin_id"`
-	Hotel_name           string `json:"hotel_name"`
-	Hotel_vpn_ip_address string `json:"hotel_vpn_ip_address"`
-	Hotel_vpn_port       string `json:"hotel_vpn_port"`
+	HotelRegion       string `json:"hotel_region"`
+	HotelAdminID      string `json:"hotel_admin_id"`
+	HotelCertName     string `json:"hotel_name_certification"`
+	HotelVpnIPAddress string `json:"hotel_vpn_ip_address"`
+	HotelVpnPort      string `json:"hotel_vpn_port"`
+	VersionMajor      int    `json:"version_major"`
+	VersionMinor      int    `json:"version_minor"`
+	VersionPatch      string `json:"version_patch"`
 }
 
-// var wg sync.WaitGroup
 var confiServer ConfigIni
-
 var pingerlog *log.Logger
 
-func get_config() {
+func get_config() error {
 	cfg, err := ini.Load("config.ini")
 	if err != nil {
-		pingerlog.Println(err)
-		os.Exit(1)
-	} else {
-		confiServer.ServerUrl = cfg.Section("server").Key("url").String()
-		confiServer.ServerPort = cfg.Section("server").Key("port").String()
-		confiServer.ServerToken = cfg.Section("server").Key("token").String()
-		confiServer.LogPath = cfg.Section("server").Key("logpath").String()
+		return err
 	}
+	confiServer.ServerUrl = cfg.Section("server").Key("url").String()
+	confiServer.ServerToken = cfg.Section("server").Key("token").String()
+	confiServer.LogPath = cfg.Section("server").Key("logpath").String()
 
+	if confiServer.ServerUrl == "" || confiServer.ServerToken == "" {
+		return fmt.Errorf("missing fields in config.ini")
+	}
+	return nil
 }
 
-func get_data() {
-	var token string = confiServer.ServerToken
-	request, err := http.PostForm("http://"+confiServer.ServerUrl+":"+confiServer.ServerPort+"/backup/gethotels/", url.Values{"token": {token}})
+func get_data() error {
+	token := fmt.Sprintf("Bearer %s", confiServer.ServerToken)
+	url := fmt.Sprintf("%s/backup/gethotels", confiServer.ServerUrl)
+	method := "GET"
+
+	client := &http.Client{}
+	req, err := http.NewRequest(method, url, nil)
+
 	if err != nil {
-		pingerlog.Println(err)
-	} else {
-		defer request.Body.Close()
-		data, err := ioutil.ReadAll(request.Body)
+		fmt.Println(err)
+		return err
+	}
+	req.Header.Add("Authorization", token)
+
+	res, err := client.Do(req)
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
+	var json_data []HotelStruct
+	if err := json.Unmarshal(body, &json_data); err != nil {
+		return fmt.Errorf("unmarshal error: %w, raw JSON: %s", err, string(body))
+	}
+
+	for _, v := range json_data {
+		list := strings.Split(v.HotelVpnIPAddress, " ")
+		for _, ip_value := range list {
+			ip_value = strings.TrimSpace(ip_value)
+			if ip_value == "" {
+				pingerlog.Println(v.HotelAdminID, "No IP")
+			} else {
+				ping_hosts(ip_value, v.HotelCertName, v.HotelAdminID)
+			}
+		}
+	}
+
+	return nil
+}
+
+func ping_hosts(ip_value, certname, hotel_id string) {
+	if ip_value == "" || ip_value == "0.0.0.0" {
+		return
+	}
+	pinger, err := ping.NewPinger(ip_value)
+	if err != nil {
+		pingerlog.Println("Error creating pinger for IP", ip_value, ":", err)
+		return
+	}
+	defer pinger.Stop()
+	pinger.SetPrivileged(true) // Не требует root
+	pinger.Count = 2
+	pinger.Timeout = 2 * time.Second
+
+	if err := pinger.Run(); err != nil {
+		pingerlog.Println("Error running pinger for IP", ip_value, ":", err)
+		return
+	}
+
+	stats := pinger.Statistics()
+	if stats.PacketsRecv > 0 {
+		version_data, err := get_version(ip_value)
 		if err != nil {
-			pingerlog.Println(err)
+			pingerlog.Printf("Failed to get version for hotel_id:%s error: %v", hotel_id, err)
 		}
-		json_data := make([]HotelStruct, 0)
+		version_data.CertName = certname
+		version_data.Hotel_id = hotel_id
+		version_data.Status = true
 
-		json.Unmarshal(data, &json_data)
-		for _, v := range json_data {
-			list := strings.Split(v.Hotel_vpn_ip_address, " ")
-			for _, ip_value := range list {
-				ip_value = strings.ReplaceAll(ip_value, " ", "")
-				if ip_value == "" {
-					pingerlog.Println(v.Hotel_admin_id, "No ip")
-				} else {
-					ping_hosts(ip_value, v.Hotel_admin_id)
-				}
-			}
+		err = send_status(version_data)
+		if err != nil {
+			pingerlog.Printf("send_status hotel_id:%s error: %v", hotel_id, err)
 		}
-	}
-}
-
-func ping_hosts(ip_value string, hotel_id string) {
-	out, err := exec.Command("fping", ip_value).Output()
-	if err != nil {
-		version_data, _ := get_version(hotel_id, ip_value)
-		send_status(hotel_id, "0", version_data)
 	} else {
-
-		if strings.Contains(string(out), "alive") {
-			version_data, status := get_version(hotel_id, ip_value)
-			if status == false {
-				send_status(hotel_id, "1", version_data)
-			} else {
-				send_status(hotel_id, "1", version_data)
-			}
-		}
-		// wg.Done()
+		err := send_status(VersionStruct{Status: false, Hotel_id: hotel_id, CertName: certname})
+		pingerlog.Printf("send_status hotel_id:%s error: %v", hotel_id, err)
 	}
 }
 
-func get_version(hotel_id string, ip string) (string, bool) {
-	json_value, _ := json.Marshal(map[string]string{
-		"major": "0",
-		"minor": "0",
-		"patch": "0",
-		"git":   "0",
-		"code":  "0",
-		"date":  "0"})
+func get_version(ip string) (VersionStruct, error) {
+	var dataVersion VersionStruct
 	url := "http://" + ip + "/version.json"
-	response, err := http.Get(url)
+	resp, err := http.Get(url)
+	if err == nil && resp.StatusCode == http.StatusOK {
+
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return VersionStruct{}, err
+		}
+		err = json.Unmarshal(data, &dataVersion)
+		if err != nil {
+			return VersionStruct{}, err
+		}
+		return dataVersion, nil
+	}
+	url = "http://" + ip + "/index.html"
+	resp, err = http.Get(url)
 	if err != nil {
-		return string(json_value), false
-	} else {
-		defer response.Body.Close()
-		switch response.StatusCode {
-		case 200:
-			var listData VersionStruct
-			data, err := ioutil.ReadAll(response.Body)
-			if err != nil {
-				return string(json_value), false
-			} else {
-				json.Unmarshal(data, &listData)
+		return VersionStruct{}, err
+	}
+	defer resp.Body.Close()
 
-				json_value, _ := json.Marshal(map[string]string{
-					"major": listData.Major,
-					"minor": listData.Minor,
-					"patch": listData.Patch,
-					"git":   listData.Git,
-					"code":  listData.Code,
-					"date":  listData.Date,
-				})
-				return string(json_value), true
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		if strings.Contains(scanner.Text(), "var version") {
+			data := strings.Fields(scanner.Text())
+			version_data := strings.ReplaceAll(data[3], "'", "")
+			version_data = strings.ReplaceAll(version_data, ";", "")
+			version_parts := strings.Split(version_data, ".")
+			if len(version_parts) >= 3 {
+				return VersionStruct{
+					Major: version_parts[0],
+					Minor: version_parts[1],
+					Patch: version_parts[2],
+					Git:   "0", Code: "0", Date: "0"}, nil
+
 			}
-		case 404:
-			url := "http://" + ip + "/index.html"
-			resp, err := http.Get(url)
-			if err != nil {
-				return string(json_value), false
-			} else {
-
-				defer resp.Body.Close()
-				scanner := bufio.NewScanner(resp.Body)
-				for scanner.Scan() {
-					if strings.Contains(scanner.Text(), "var version") {
-						data := strings.Fields(scanner.Text())
-						version_data := data[3]
-						version := strings.ReplaceAll(version_data, "'", "")
-						version = strings.ReplaceAll(version, ";", "")
-
-						version2 := strings.Split(version, ".")
-						json_value, _ = json.Marshal(map[string]string{
-							"major": version2[0],
-							"minor": version2[1],
-							"patch": version2[2],
-							"git":   "0",
-							"code":  "0",
-							"date":  "0"})
-						return string(json_value), true
-					}
-				}
-			}
-		default:
-			return string(json_value), false
 		}
 	}
-	return string(json_value), false
+	return VersionStruct{}, fmt.Errorf("unable to determine version for IP: %s", ip)
 }
 
-func send_status(hotel_id string, status string, version string) {
-	var data_version VersionStruct
-	data_version.Hotel_id = hotel_id
-	data_version.Status = status
-	data_version.Token = confiServer.ServerToken
-	json.Unmarshal([]byte(version), &data_version)
-	data, err := json.MarshalIndent(data_version, "", "  ")
-	println(string(data))
+func send_status(version VersionStruct) error {
+	token := fmt.Sprintf("Bearer %s", confiServer.ServerToken)
+	data, err := json.Marshal(version)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", confiServer.ServerUrl+"/dashboard/ping", bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(data))
+	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	req.Header.Add("Authorization", token)
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		pingerlog.Println(err)
-	} else {
-		request, error := http.NewRequest("POST", "http://"+confiServer.ServerUrl+":"+confiServer.ServerPort+"/dashboard/goping/", bytes.NewBuffer([]byte(data)))
-		if error != nil {
-			pingerlog.Println(error.Error())
-		}
-		request.Header.Set("Content-Type", "application/json; charset=UTF-8")
-		client := &http.Client{}
-		response, error := client.Do(request)
-		if error != nil {
-			pingerlog.Println(error.Error())
-		}
-		pingerlog.Println("hotel_id:", hotel_id, "status response:", response.StatusCode)
-
+		return err
 	}
+	defer resp.Body.Close()
+	return nil
 }
 
 func main() {
-	get_config()
-	file, err := os.OpenFile(confiServer.LogPath+"pinger.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
-	if err != nil {
-		log.Fatal(err)
+	if err := get_config(); err != nil {
+		log.Fatalf("Error loading config: %v", err)
 	}
-	defer file.Close()
-	pingerlog = log.New(file, "pinger: ", log.LstdFlags)
-	pingerlog.Println("*** Get data from server ***")
-	get_data()
-	// wg.Wait()
-	pingerlog.Println("*** END ***")
+
+	pingerlog = log.New(os.Stdout, "pinger: ", log.LstdFlags)
+
+	for {
+		pingerlog.Println("*** Get data from server ***")
+		get_data()
+		pingerlog.Println("*** END ***")
+		time.Sleep(120 * time.Second)
+	}
 }
