@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,12 +34,20 @@ type ConfigIni struct {
 	ServerPort  string
 	LogPath     string
 }
+type version struct {
+	Major string `json:"major"`
+	Minor string `json:"minor"`
+	Patch string `json:"patch"`
+	Git   string `json:"git"`
+	Code  string `json:"code"`
+	Date  string `json:"date"`
+}
 
 type VersionStruct struct {
 	Hotel_id string `json:"hotel_id"`
 	Status   bool   `json:"status"`
-	Major    string `json:"major"`
-	Minor    string `json:"minor"`
+	Major    int    `json:"major"`
+	Minor    int    `json:"minor"`
 	Patch    string `json:"patch"`
 	Git      string `json:"git"`
 	Code     string `json:"code"`
@@ -52,9 +61,6 @@ type HotelStruct struct {
 	HotelCertName     string `json:"hotel_name_certification"`
 	HotelVpnIPAddress string `json:"hotel_vpn_ip_address"`
 	HotelVpnPort      string `json:"hotel_vpn_port"`
-	VersionMajor      int    `json:"version_major"`
-	VersionMinor      int    `json:"version_minor"`
-	VersionPatch      string `json:"version_patch"`
 }
 
 var confiServer ConfigIni
@@ -91,14 +97,12 @@ func get_data() error {
 
 	res, err := client.Do(req)
 	if err != nil {
-		fmt.Println(err)
 		return err
 	}
 	defer res.Body.Close()
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		fmt.Println(err)
 		return err
 	}
 	var json_data []HotelStruct
@@ -110,8 +114,9 @@ func get_data() error {
 		list := strings.Split(v.HotelVpnIPAddress, " ")
 		for _, ip_value := range list {
 			ip_value = strings.TrimSpace(ip_value)
-			if ip_value == "" {
+			if ip_value == "" || ip_value == "0.0.0.0" {
 				pingerlog.Println(v.HotelAdminID, "No IP")
+				continue
 			} else {
 				ping_hosts(ip_value, v.HotelCertName, v.HotelAdminID)
 			}
@@ -133,7 +138,7 @@ func ping_hosts(ip_value, certname, hotel_id string) {
 	defer pinger.Stop()
 	pinger.SetPrivileged(true) // Не требует root
 	pinger.Count = 2
-	pinger.Timeout = 2 * time.Second
+	pinger.Timeout = 10 * time.Second
 
 	if err := pinger.Run(); err != nil {
 		pingerlog.Println("Error running pinger for IP", ip_value, ":", err)
@@ -161,7 +166,7 @@ func ping_hosts(ip_value, certname, hotel_id string) {
 }
 
 func get_version(ip string) (VersionStruct, error) {
-	var dataVersion VersionStruct
+	var ver version
 	url := "http://" + ip + "/version.json"
 	resp, err := http.Get(url)
 	if err == nil && resp.StatusCode == http.StatusOK {
@@ -170,11 +175,27 @@ func get_version(ip string) (VersionStruct, error) {
 		if err != nil {
 			return VersionStruct{}, err
 		}
-		err = json.Unmarshal(data, &dataVersion)
+		err = json.Unmarshal(data, &ver)
 		if err != nil {
 			return VersionStruct{}, err
 		}
-		return dataVersion, nil
+		major, err := strconv.Atoi(ver.Major)
+		if err != nil {
+			return VersionStruct{}, err
+		}
+		minor, err := strconv.Atoi(ver.Minor)
+		if err != nil {
+			return VersionStruct{}, err
+		}
+
+		return VersionStruct{
+			Major: major,
+			Minor: minor,
+			Patch: ver.Patch,
+			Git:   ver.Git,
+			Code:  ver.Code,
+			Date:  ver.Date,
+		}, nil
 	}
 	url = "http://" + ip + "/index.html"
 	resp, err = http.Get(url)
@@ -191,9 +212,17 @@ func get_version(ip string) (VersionStruct, error) {
 			version_data = strings.ReplaceAll(version_data, ";", "")
 			version_parts := strings.Split(version_data, ".")
 			if len(version_parts) >= 3 {
+				major, err := strconv.Atoi(version_parts[0])
+				if err != nil {
+					return VersionStruct{}, err
+				}
+				minor, err := strconv.Atoi(version_parts[1])
+				if err != nil {
+					return VersionStruct{}, err
+				}
 				return VersionStruct{
-					Major: version_parts[0],
-					Minor: version_parts[1],
+					Major: major,
+					Minor: minor,
 					Patch: version_parts[2],
 					Git:   "0", Code: "0", Date: "0"}, nil
 
